@@ -9,11 +9,6 @@ package model
 import (
 	"bytes"
 	"errors"
-	"fmt"
-	"io"
-	"math"
-
-	"github.com/ooni/minivpn/internal/bytesx"
 )
 
 // Opcode is an OpenVPN packet opcode.
@@ -30,6 +25,8 @@ const (
 	P_CONTROL_HARD_RESET_CLIENT_V2                    // 7
 	P_CONTROL_HARD_RESET_SERVER_V2                    // 8
 	P_DATA_V2                                         // 9
+	P_CONTROL_HARD_RESET_CLIENT_V3                    // 10
+	P_CONTROL_WKC_V1                                  // 11
 )
 
 // NewOpcodeFromString returns an opcode from a string representation, and an error if it cannot parse the opcode
@@ -54,6 +51,11 @@ func NewOpcodeFromString(s string) (Opcode, error) {
 		return P_CONTROL_HARD_RESET_SERVER_V2, nil
 	case "DATA_V2":
 		return P_DATA_V2, nil
+	case "P_CONTROL_HARD_RESET_CLIENT_V3":
+		return P_CONTROL_HARD_RESET_CLIENT_V3, nil
+	case "P_CONTROL_WKC_V1":
+		return P_CONTROL_WKC_V1, nil
+		// 11
 	default:
 		return 0, errors.New("unknown opcode")
 	}
@@ -89,6 +91,12 @@ func (op Opcode) String() string {
 	case P_DATA_V2:
 		return "P_DATA_V2"
 
+	case P_CONTROL_HARD_RESET_CLIENT_V3:
+		return "P_CONTROL_HARD_RESET_CLIENT_V3"
+
+	case P_CONTROL_WKC_V1:
+		return "P_CONTROL_WKC_V1"
+
 	default:
 		return "P_UNKNOWN"
 	}
@@ -102,6 +110,8 @@ func (op Opcode) IsControl() bool {
 		P_CONTROL_SOFT_RESET_V1,
 		P_CONTROL_V1,
 		P_CONTROL_HARD_RESET_CLIENT_V2,
+		P_CONTROL_HARD_RESET_CLIENT_V3,
+		P_CONTROL_WKC_V1,
 		P_CONTROL_HARD_RESET_SERVER_V2:
 		return true
 	default:
@@ -128,6 +138,9 @@ type PacketID uint32
 // PeerID is the type of the P_DATA_V2 peer ID.
 type PeerID [3]byte
 
+// Optional timestamp field used for tls-auth (seconds since the epoch)
+type PacketTimestamp uint32
+
 // Packet is an OpenVPN packet.
 type Packet struct {
 	// Opcode is the packet message type (a P_* constant; high 5-bits of
@@ -145,71 +158,24 @@ type Packet struct {
 	// LocalSessionID is the local session ID.
 	LocalSessionID SessionID
 
+	// An additional packet id used for replay protection in tls-auth mode ONLY. A seperate
+	// counter is used that additional includes p_ACK packets
+	ReplayPacketID PacketID
+
+	// Optional timestamp field used for tls-auth (seconds since the epoch)
+	Timestamp PacketTimestamp
+
 	// Acks contains the remote packets we're ACKing.
 	ACKs []PacketID
 
 	// RemoteSessionID is the remote session ID.
 	RemoteSessionID SessionID
 
-	// ID is the packet-id for replay protection. According to the spec: "4 or 8 bytes,
-	// includes sequence number and optional time_t timestamp".
-	//
-	// This library does not use the timestamp.
-	// TODO(ainghazal): use optional.Value (only control packets have packet id)
+	// message packet-id (4 bytes)
 	ID PacketID
 
 	// Payload is the packet's payload.
 	Payload []byte
-}
-
-// ErrPacketTooShort indicates that a packet is too short.
-var ErrPacketTooShort = errors.New("openvpn: packet too short")
-
-// ParsePacket produces a packet after parsing the common header. We assume that
-// the underlying connection has already stripped out the framing.
-func ParsePacket(buf []byte) (*Packet, error) {
-	// a valid packet is larger, but this allows us
-	// to keep parsing a non-data packet.
-	if len(buf) < 2 {
-		return nil, ErrPacketTooShort
-	}
-	// parsing opcode and keyID
-	opcode := Opcode(buf[0] >> 3)
-	keyID := buf[0] & 0x07
-
-	// extract the packet payload and possibly the peerID
-	var (
-		payload []byte
-		peerID  PeerID
-	)
-	switch opcode {
-	case P_DATA_V2:
-		if len(buf) < 4 {
-			return nil, ErrPacketTooShort
-		}
-		copy(peerID[:], buf[1:4])
-		payload = buf[4:]
-	default:
-		payload = buf[1:]
-	}
-
-	// ACKs and control packets require more complex parsing
-	if opcode.IsControl() || opcode == P_ACK_V1 {
-		return parseControlOrACKPacket(opcode, keyID, payload)
-	}
-
-	// otherwise just return the data packet.
-	p := &Packet{
-		Opcode:          opcode,
-		KeyID:           keyID,
-		PeerID:          peerID,
-		LocalSessionID:  [8]byte{},
-		ACKs:            []PacketID{},
-		RemoteSessionID: [8]byte{},
-		ID:              0,
-		Payload:         payload,
-	}
-	return p, nil
 }
 
 // NewPacket returns a packet from the passed arguments: opcode, keyID and a raw payload.
@@ -224,107 +190,6 @@ func NewPacket(opcode Opcode, keyID uint8, payload []byte) *Packet {
 		ID:              0,
 		Payload:         payload,
 	}
-}
-
-// ErrEmptyPayload indicates tha the payload of an OpenVPN control packet is empty.
-var ErrEmptyPayload = errors.New("openvpn: empty payload")
-
-// ErrParsePacket is a generic packet parse error which may be further qualified.
-var ErrParsePacket = errors.New("openvpn: packet parse error")
-
-// parseControlOrACKPacket parses the contents of a control or ACK packet.
-func parseControlOrACKPacket(opcode Opcode, keyID byte, payload []byte) (*Packet, error) {
-	// make sure we have payload to parse and we're parsing control or ACK
-	if len(payload) <= 0 {
-		return nil, ErrEmptyPayload
-	}
-	if !opcode.IsControl() && opcode != P_ACK_V1 {
-		return nil, fmt.Errorf("%w: %s", ErrParsePacket, "expected control/ack packet")
-	}
-
-	// create a buffer for parsing the packet
-	buf := bytes.NewBuffer(payload)
-
-	p := NewPacket(opcode, keyID, payload)
-
-	// local session id
-	if _, err := io.ReadFull(buf, p.LocalSessionID[:]); err != nil {
-		return p, fmt.Errorf("%w: bad sessionID: %s", ErrParsePacket, err)
-	}
-
-	// ack array length
-	ackArrayLenByte, err := buf.ReadByte()
-	if err != nil {
-		return p, fmt.Errorf("%w: bad ack: %s", ErrParsePacket, err)
-	}
-	ackArrayLen := int(ackArrayLenByte)
-
-	// ack array
-	p.ACKs = make([]PacketID, ackArrayLen)
-	for i := 0; i < ackArrayLen; i++ {
-		val, err := bytesx.ReadUint32(buf)
-		if err != nil {
-			return p, fmt.Errorf("%w: cannot parse ack id: %s", ErrParsePacket, err)
-		}
-		p.ACKs[i] = PacketID(val)
-	}
-
-	// remote session id
-	if ackArrayLen > 0 {
-		if _, err = io.ReadFull(buf, p.RemoteSessionID[:]); err != nil {
-			return p, fmt.Errorf("%w: bad remote sessionID: %s", ErrParsePacket, err)
-		}
-	}
-
-	// packet id
-	if p.Opcode != P_ACK_V1 {
-		val, err := bytesx.ReadUint32(buf)
-		if err != nil {
-			return p, fmt.Errorf("%w: bad packetID: %s", ErrParsePacket, err)
-		}
-		p.ID = PacketID(val)
-	}
-
-	// payload
-	p.Payload = buf.Bytes()
-	return p, nil
-}
-
-// ErrMarshalPacket is the error returned when we cannot marshal a packet.
-var ErrMarshalPacket = errors.New("cannot marshal packet")
-
-// Bytes returns a byte array that is ready to be sent on the wire.
-func (p *Packet) Bytes() ([]byte, error) {
-	buf := &bytes.Buffer{}
-
-	switch p.Opcode {
-	case P_DATA_V2:
-		// we assume this is an encrypted data packet,
-		// so we serialize just the encrypted payload
-
-	default:
-		buf.WriteByte((byte(p.Opcode) << 3) | (p.KeyID & 0x07))
-		buf.Write(p.LocalSessionID[:])
-		// we write a byte with the number of acks, and then serialize each ack.
-		nAcks := len(p.ACKs)
-		if nAcks > math.MaxUint8 {
-			return nil, fmt.Errorf("%w: too many ACKs", ErrMarshalPacket)
-		}
-		buf.WriteByte(byte(nAcks))
-		for i := 0; i < nAcks; i++ {
-			bytesx.WriteUint32(buf, uint32(p.ACKs[i]))
-		}
-		// remote session id
-		if len(p.ACKs) > 0 {
-			buf.Write(p.RemoteSessionID[:])
-		}
-		if p.Opcode != P_ACK_V1 {
-			bytesx.WriteUint32(buf, uint32(p.ID))
-		}
-	}
-	//  payload
-	buf.Write(p.Payload)
-	return buf.Bytes(), nil
 }
 
 // IsControl returns true if the packet is any of the control types.
