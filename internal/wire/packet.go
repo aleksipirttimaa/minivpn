@@ -2,6 +2,8 @@ package wire
 
 import (
 	"bytes"
+	"crypto"
+	"crypto/hmac"
 	"errors"
 	"fmt"
 	"io"
@@ -49,10 +51,10 @@ func MarshalPacket(p *model.Packet, packetAuth *ControlChannelSecurity) ([]byte,
 			buf.Write(ctrl)
 
 		case ControlSecurityModeTLSAuth:
-			digest := GenerateTLSAuthDigest(packetAuth.LocalDigestKey, header, replay, ctrl)
+			digest := GenerateTLSAuthDigest(packetAuth.LocalDigestKey, packetAuth.TLSAuthDigest, header, replay, ctrl)
 
 			buf.Write(header)
-			buf.Write(digest[:])
+			buf.Write(digest)
 			buf.Write(replay)
 			buf.Write(ctrl)
 
@@ -157,8 +159,8 @@ func parseControlOrACKPacket(opcode model.Opcode, keyID byte, payload []byte, pa
 			return p, err
 		}
 	case ControlSecurityModeTLSAuth:
-		var digestGot SHA1HMACDigest
-		if _, err := io.ReadFull(buf, digestGot[:]); err != nil {
+		digestGot := make([]byte, packetAuth.TLSAuthDigest.Size())
+		if _, err := io.ReadFull(buf, digestGot); err != nil {
 			return p, fmt.Errorf("%w: %s", ErrParsePacket, err)
 		}
 
@@ -173,7 +175,7 @@ func parseControlOrACKPacket(opcode model.Opcode, keyID byte, payload []byte, pa
 		// matches what we recieved from the server. Invalid digest could indicate
 		// that the server is not in possession of pre-shared key OR packet contents
 		// has been tampered with
-		match, err := validateTLSAuthDigest(p, packetAuth.RemoteDigestKey, &digestGot)
+		match, err := validateTLSAuthDigest(p, packetAuth.RemoteDigestKey, packetAuth.TLSAuthDigest, digestGot)
 		if err != nil || !match {
 			return p, fmt.Errorf("%w: packet digest (hmac) is not valid", ErrParsePacket)
 		}
@@ -217,7 +219,7 @@ func parseControlOrACKPacket(opcode model.Opcode, keyID byte, payload []byte, pa
 	return p, nil
 }
 
-func validateTLSAuthDigest(p *model.Packet, key *ControlChannelKey, got *SHA1HMACDigest) (bool, error) {
+func validateTLSAuthDigest(p *model.Packet, key *ControlChannelKey, digest crypto.Hash, got []byte) (bool, error) {
 	header := headerBytes(p)
 	replay := replayProtectionBytes(p)
 	ctrl, err := controlMessageBytes(p)
@@ -225,8 +227,8 @@ func validateTLSAuthDigest(p *model.Packet, key *ControlChannelKey, got *SHA1HMA
 		return false, err
 	}
 
-	want := GenerateTLSAuthDigest(key, header, replay, ctrl)
-	return *got == want, nil
+	want := GenerateTLSAuthDigest(key, digest, header, replay, ctrl)
+	return hmac.Equal(got, want), nil
 
 }
 

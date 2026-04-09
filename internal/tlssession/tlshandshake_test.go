@@ -666,7 +666,7 @@ func Test_customVerify(t *testing.T) {
 		if err != nil {
 			t.Error(err)
 		}
-		customVerify := customVerifyFactory(auth)
+		customVerify := customVerifyFactory(auth, "")
 
 		err = customVerify(rawCerts, nil)
 		if err != nil {
@@ -691,7 +691,7 @@ func Test_customVerify(t *testing.T) {
 			t.Error(err)
 			return
 		}
-		customVerify := customVerifyFactory(auth)
+		customVerify := customVerifyFactory(auth, "")
 
 		wantErr := ErrCannotVerifyCertChain
 		err = customVerify(rawCerts, nil)
@@ -715,7 +715,7 @@ func Test_customVerify(t *testing.T) {
 			t.Error(err)
 			return
 		}
-		customVerify := customVerifyFactory(auth)
+		customVerify := customVerifyFactory(auth, "")
 
 		wantErr := ErrCannotVerifyCertChain
 		err = customVerify(rawCerts, nil)
@@ -753,7 +753,7 @@ func Test_customVerify(t *testing.T) {
 			t.Error(err)
 			return
 		}
-		customVerify := customVerifyFactory(auth)
+		customVerify := customVerifyFactory(auth, "")
 
 		err = customVerify(rawCerts, nil)
 		if !errors.Is(err, wantErr) {
@@ -772,7 +772,7 @@ func Test_customVerify(t *testing.T) {
 		}
 
 		auth, err := makeCertAndCAFromMemory(ca, vpnCert, vpnKey)
-		customVerify := customVerifyFactory(auth)
+		customVerify := customVerifyFactory(auth, "")
 
 		err = customVerify(emptyCerts, nil)
 		if !errors.Is(err, wantErr) {
@@ -795,7 +795,7 @@ func Test_customVerify(t *testing.T) {
 			t.Error(err)
 			return
 		}
-		customVerify := customVerifyFactory(auth)
+		customVerify := customVerifyFactory(auth, "")
 
 		err = customVerify(garbageCerts, nil)
 		if !errors.Is(err, wantErr) {
@@ -820,7 +820,7 @@ func Test_customVerify(t *testing.T) {
 			t.Error(err)
 			return
 		}
-		customVerify := customVerifyFactory(auth)
+		customVerify := customVerifyFactory(auth, "")
 
 		err = customVerify(badChain, nil)
 		if !errors.Is(err, wantErr) {

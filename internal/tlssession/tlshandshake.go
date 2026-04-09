@@ -112,8 +112,10 @@ type authorityPinner interface {
 // certConfig holds the parsed certificate and CA used for OpenVPN mutual
 // certificate authentication.
 type certConfig struct {
-	cert tls.Certificate
-	ca   *x509.CertPool
+	cert             tls.Certificate
+	ca               *x509.CertPool
+	remoteCertEKU    string
+	tlsCipherSuites  []uint16 // nil means use fingerprint default
 }
 
 // newCertConfigFromOptions is a constructor that returns a certConfig object initialized
@@ -136,6 +138,16 @@ func newCertConfigFromOptions(o *config.OpenVPNOptions) (*certConfig, error) {
 			ca:   o.CA,
 		})
 	}
+	if err == nil {
+		cfg.remoteCertEKU = o.RemoteCertEKU
+		if o.TLSCipher != "" {
+			suites, err := parseTLSCipherList(o.TLSCipher)
+			if err != nil {
+				return nil, err
+			}
+			cfg.tlsCipherSuites = suites
+		}
+	}
 	return cfg, err
 }
 
@@ -152,7 +164,7 @@ type verifyFun func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) err
 
 // customVerifyFactory returns a verifyFun callback that will verify any received certificates
 // against the ca provided by the pased implementation of authorityPinner
-func customVerifyFactory(pinner authorityPinner) verifyFun {
+func customVerifyFactory(pinner authorityPinner, requiredEKU string) verifyFun {
 	// customVerify is a version of the verification routines that does not try to verify
 	// the Common Name, since we don't know it a priori for a VPN gateway. Returns
 	// an error if the verification fails.
@@ -174,6 +186,11 @@ func customVerifyFactory(pinner authorityPinner) verifyFun {
 		if _, err := leaf.Verify(opts); err != nil {
 			return fmt.Errorf("%w: %s", ErrCannotVerifyCertChain, err)
 		}
+		if requiredEKU != "" {
+			if err := checkEKU(leaf, requiredEKU); err != nil {
+				return err
+			}
+		}
 		return nil
 	}
 	return customVerify
@@ -187,7 +204,7 @@ func customVerifyFactory(pinner authorityPinner) verifyFun {
 func initTLS(cfg *certConfig) (*tls.Config, error) {
 	runtimex.Assert(cfg != nil, "passed nil configuration")
 
-	customVerify := customVerifyFactory(cfg)
+	customVerify := customVerifyFactory(cfg, cfg.remoteCertEKU)
 
 	tlsConf := &tls.Config{
 		// the certificate we've loaded from the config file
@@ -201,6 +218,8 @@ func initTLS(cfg *certConfig) (*tls.Config, error) {
 		// uTLS does not pick min/max version from the passed spec
 		MinVersion: tls.VersionTLS12,
 		MaxVersion: tls.VersionTLS13,
+		// non-nil overrides the fingerprint's cipher list in parrotTLSFactory
+		CipherSuites: cfg.tlsCipherSuites,
 	} //#nosec G402
 
 	return tlsConf, nil
@@ -253,6 +272,22 @@ func parrotTLSFactory(conn net.Conn, config *tls.Config) (handshaker, error) {
 	generatedSpec, err := fingerprinter.FingerprintClientHello(rawOpenVPNClientHelloBytes)
 	if err != nil {
 		return nil, fmt.Errorf("%w: fingerprinting failed: %s", ErrBadParrot, err)
+	}
+	if len(config.CipherSuites) > 0 {
+		var combined []uint16
+		// Preserve TLS 1.3 ciphers from the fingerprint (--tls-cipher does not affect them).
+		for _, id := range generatedSpec.CipherSuites {
+			if id >= 0x1300 && id <= 0x13ff {
+				combined = append(combined, id)
+			}
+		}
+		// Append user's TLS 1.2 ciphers; skip TLS 1.3 IDs to avoid duplicates.
+		for _, id := range config.CipherSuites {
+			if id < 0x1300 || id > 0x13ff {
+				combined = append(combined, id)
+			}
+		}
+		generatedSpec.CipherSuites = combined
 	}
 	client := tls.UClient(conn, config, tls.HelloCustom)
 	if err := client.ApplyPreset(generatedSpec); err != nil {

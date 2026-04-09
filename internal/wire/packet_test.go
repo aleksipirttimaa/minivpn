@@ -1,6 +1,8 @@
 package wire
 
 import (
+	"crypto"
+	_ "crypto/sha1"
 	"encoding/hex"
 	"errors"
 	"strconv"
@@ -322,7 +324,7 @@ func TestMarshalPacketTLSAuth(t *testing.T) {
 	packet.ReplayPacketID = 1
 	packet.Timestamp = model.PacketTimestamp(timestamp)
 
-	pa, err := NewControlChannelSecurityTLSAuth([]byte(OVPN_STATIC_KEY_AUTH), 1)
+	pa, err := NewControlChannelSecurityTLSAuth([]byte(OVPN_STATIC_KEY_AUTH), 1, crypto.SHA1)
 	if err != nil {
 		t.Error(err)
 	}

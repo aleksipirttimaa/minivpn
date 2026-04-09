@@ -23,7 +23,7 @@ type Config struct {
 // NewConfig returns a Config ready to intialize a vpn tunnel.
 func NewConfig(options ...Option) *Config {
 	cfg := &Config{
-		openvpnOptions: &OpenVPNOptions{},
+		openvpnOptions: &OpenVPNOptions{TLSAuthDirection: -1, Auth: "SHA1"},
 		logger:         log.Log,
 		tracer:         &model.DummyTracer{},
 	}

@@ -23,6 +23,10 @@ var (
 
 	// ErrNoRemoteSessionID indicates we are missing the remote session ID.
 	ErrNoRemoteSessionID = errors.New("missing remote session ID")
+
+	// ErrAmbiguousControlChannelSecurity is returned when more than one of
+	// tls-auth, tls-crypt, and tls-crypt-v2 are configured simultaneously.
+	ErrAmbiguousControlChannelSecurity = errors.New("tls-auth, tls-crypt and tls-crypt-v2 are mutually exclusive")
 )
 
 // Manager manages the session. The zero value is invalid. Please, construct
@@ -95,52 +99,85 @@ func NewManager(config *config.Config) (*Manager, error) {
 	}
 	k.AddLocalKey(localKey)
 
-	// Need to load tls-auth from file
-	if len(config.OpenVPNOptions().TLSAuthPath) != 0 {
-		authData, err := os.ReadFile(config.OpenVPNOptions().TLSAuthPath)
+	// tls-auth, tls-crypt and tls-crypt-v2 are mutually exclusive
+	opts := config.OpenVPNOptions()
+	configured := 0
+	if len(opts.TLSAuthPath) != 0 || len(opts.TLSAuth) != 0 {
+		configured++
+	}
+	if len(opts.TLSCryptPath) != 0 || len(opts.TLSCrypt) != 0 {
+		configured++
+	}
+	if len(opts.TLSCryptV2Path) != 0 || len(opts.TLSCryptV2) != 0 {
+		configured++
+	}
+	if configured > 1 {
+		return sessionManager, ErrAmbiguousControlChannelSecurity
+	}
+
+	switch {
+	case len(opts.TLSAuthPath) != 0 || len(opts.TLSAuth) != 0:
+		if opts.TLSAuthDirection < 0 {
+			return sessionManager, fmt.Errorf("tls-auth requires key-direction (0 or 1) to be set")
+		}
+		var authData []byte
+		if len(opts.TLSAuthPath) != 0 {
+			authData, err = os.ReadFile(opts.TLSAuthPath)
+			if err != nil {
+				return sessionManager, err
+			}
+		} else {
+			authData = opts.TLSAuth
+		}
+		tlsAuthDigest, err := wire.AuthNameToHash(opts.Auth)
 		if err != nil {
 			return sessionManager, err
 		}
-
-		// TODO: provide ability to pass in key direction
-		sessionManager.controlChannelSecurity, err = wire.NewControlChannelSecurityTLSAuth(authData, 1)
+		sessionManager.controlChannelSecurity, err = wire.NewControlChannelSecurityTLSAuth(authData, opts.TLSAuthDirection, tlsAuthDigest)
 		if err != nil {
 			return sessionManager, err
 		}
-
-		// replay packet id starts at 1 but is offset here becuase the first packet is always a hard reset packet which is hardcoded to 1
+		// replay packet id starts at 1 but is offset here because the first packet is always a hard reset packet which is hardcoded to 1
 		sessionManager.localControlReplayPacketID = 2
-	} else if len(config.OpenVPNOptions().TLSCryptPath) != 0 {
-		authData, err := os.ReadFile(config.OpenVPNOptions().TLSCryptPath)
-		if err != nil {
-			return sessionManager, err
-		}
 
+	case len(opts.TLSCryptPath) != 0 || len(opts.TLSCrypt) != 0:
+		var authData []byte
+		if len(opts.TLSCryptPath) != 0 {
+			authData, err = os.ReadFile(opts.TLSCryptPath)
+			if err != nil {
+				return sessionManager, err
+			}
+		} else {
+			authData = opts.TLSCrypt
+		}
 		sessionManager.controlChannelSecurity, err = wire.NewControlChannelSecurityTLSCrypt(authData)
 		if err != nil {
 			return sessionManager, err
 		}
-
-		// replay packet id starts at 1 but is offset here becuase the first packet is always a hard reset packet which is hardcoded to 1
+		// replay packet id starts at 1 but is offset here because the first packet is always a hard reset packet which is hardcoded to 1
 		sessionManager.localControlReplayPacketID = 2
-	} else if len(config.OpenVPNOptions().TLSCryptV2Path) != 0 {
-		authData, err := os.ReadFile(config.OpenVPNOptions().TLSCryptV2Path)
-		if err != nil {
-			return sessionManager, err
-		}
 
+	case len(opts.TLSCryptV2Path) != 0 || len(opts.TLSCryptV2) != 0:
+		var authData []byte
+		if len(opts.TLSCryptV2Path) != 0 {
+			authData, err = os.ReadFile(opts.TLSCryptV2Path)
+			if err != nil {
+				return sessionManager, err
+			}
+		} else {
+			authData = opts.TLSCryptV2
+		}
 		sessionManager.controlChannelSecurity, err = wire.NewControlChannelSecurityTLSCryptV2(authData)
 		if err != nil {
 			return sessionManager, err
 		}
-
-		// replay packet id starts at 1 but is offset here becuase the first packet is always a hard reset packet which is hardcoded to 1
+		// replay packet id starts at 1 but is offset here because the first packet is always a hard reset packet which is hardcoded to 1
 		sessionManager.localControlReplayPacketID = 2
-	} else {
+
+	default:
 		sessionManager.controlChannelSecurity = &wire.ControlChannelSecurity{
 			Mode: wire.ControlSecurityModeNone,
 		}
-
 	}
 
 	return sessionManager, nil

@@ -455,11 +455,11 @@ func Test_parseKey(t *testing.T) {
 }
 
 func Test_parseTLSAuth(t *testing.T) {
-	t.Run("more than one part should fail", func(t *testing.T) {
-		_, err := parseTLSAuth([]string{"one", "two"}, &OpenVPNOptions{}, "")
+	t.Run("more than two parts should fail", func(t *testing.T) {
+		_, err := parseTLSAuth([]string{"one", "two", "three"}, &OpenVPNOptions{}, "")
 		wantErr := ErrBadConfig
 		if !errors.Is(err, wantErr) {
-			t.Errorf("parseCA(): want %v, got %v", wantErr, err)
+			t.Errorf("parseTLSAuth(): want %v, got %v", wantErr, err)
 		}
 	})
 
@@ -467,7 +467,107 @@ func Test_parseTLSAuth(t *testing.T) {
 		_, err := parseTLSAuth([]string{}, &OpenVPNOptions{}, "")
 		wantErr := ErrBadConfig
 		if !errors.Is(err, wantErr) {
-			t.Errorf("parseCA(): want %v, got %v", wantErr, err)
+			t.Errorf("parseTLSAuth(): want %v, got %v", wantErr, err)
+		}
+	})
+
+	t.Run("file with direction 0 sets TLSAuthDirection=0", func(t *testing.T) {
+		d := t.TempDir()
+		writeDummyCertFiles(d)
+		opt, err := parseTLSAuth([]string{"ta.pem", "0"}, &OpenVPNOptions{TLSAuthDirection: -1}, d)
+		if err != nil {
+			t.Errorf("parseTLSAuth(): unexpected error: %v", err)
+		}
+		if opt.TLSAuthDirection != 0 {
+			t.Errorf("parseTLSAuth(): want TLSAuthDirection=0, got %d", opt.TLSAuthDirection)
+		}
+	})
+
+	t.Run("file with direction 1 sets TLSAuthDirection=1", func(t *testing.T) {
+		d := t.TempDir()
+		writeDummyCertFiles(d)
+		opt, err := parseTLSAuth([]string{"ta.pem", "1"}, &OpenVPNOptions{TLSAuthDirection: -1}, d)
+		if err != nil {
+			t.Errorf("parseTLSAuth(): unexpected error: %v", err)
+		}
+		if opt.TLSAuthDirection != 1 {
+			t.Errorf("parseTLSAuth(): want TLSAuthDirection=1, got %d", opt.TLSAuthDirection)
+		}
+	})
+
+	t.Run("file with invalid direction fails", func(t *testing.T) {
+		d := t.TempDir()
+		writeDummyCertFiles(d)
+		_, err := parseTLSAuth([]string{"ta.pem", "2"}, &OpenVPNOptions{TLSAuthDirection: -1}, d)
+		if !errors.Is(err, ErrBadConfig) {
+			t.Errorf("parseTLSAuth(): want ErrBadConfig, got %v", err)
+		}
+	})
+}
+
+func Test_parseKeyDirectionDirective(t *testing.T) {
+	t.Run("direction 0 sets TLSAuthDirection=0", func(t *testing.T) {
+		opt, err := parseKeyDirectionDirective([]string{"0"}, &OpenVPNOptions{TLSAuthDirection: -1})
+		if err != nil {
+			t.Errorf("parseKeyDirectionDirective(): unexpected error: %v", err)
+		}
+		if opt.TLSAuthDirection != 0 {
+			t.Errorf("want TLSAuthDirection=0, got %d", opt.TLSAuthDirection)
+		}
+	})
+
+	t.Run("direction 1 sets TLSAuthDirection=1", func(t *testing.T) {
+		opt, err := parseKeyDirectionDirective([]string{"1"}, &OpenVPNOptions{TLSAuthDirection: -1})
+		if err != nil {
+			t.Errorf("parseKeyDirectionDirective(): unexpected error: %v", err)
+		}
+		if opt.TLSAuthDirection != 1 {
+			t.Errorf("want TLSAuthDirection=1, got %d", opt.TLSAuthDirection)
+		}
+	})
+
+	t.Run("invalid direction fails", func(t *testing.T) {
+		_, err := parseKeyDirectionDirective([]string{"2"}, &OpenVPNOptions{TLSAuthDirection: -1})
+		if !errors.Is(err, ErrBadConfig) {
+			t.Errorf("want ErrBadConfig, got %v", err)
+		}
+	})
+
+	t.Run("empty args fail", func(t *testing.T) {
+		_, err := parseKeyDirectionDirective([]string{}, &OpenVPNOptions{})
+		if !errors.Is(err, ErrBadConfig) {
+			t.Errorf("want ErrBadConfig, got %v", err)
+		}
+	})
+}
+
+func TestGetOptionsFromLines_KeyDirection(t *testing.T) {
+	t.Run("key-direction directive is parsed", func(t *testing.T) {
+		l := []string{
+			"<tls-auth>",
+			"ta_string",
+			"</tls-auth>",
+			"key-direction 1",
+		}
+		o, err := getOptionsFromLines(l, "")
+		if err != nil {
+			t.Errorf("unexpected error: %v", err)
+		}
+		if o.TLSAuthDirection != 1 {
+			t.Errorf("want TLSAuthDirection=1, got %d", o.TLSAuthDirection)
+		}
+	})
+
+	t.Run("tls-auth with direction 0 in config file", func(t *testing.T) {
+		d := t.TempDir()
+		writeDummyCertFiles(d)
+		l := []string{"tls-auth ta.pem 0"}
+		o, err := getOptionsFromLines(l, d)
+		if err != nil {
+			t.Errorf("unexpected error: %v", err)
+		}
+		if o.TLSAuthDirection != 0 {
+			t.Errorf("want TLSAuthDirection=0, got %d", o.TLSAuthDirection)
 		}
 	})
 }
@@ -544,6 +644,84 @@ func Test_parseAuth(t *testing.T) {
 			}
 		})
 	}
+}
+
+func Test_parseTLSCipher(t *testing.T) {
+	t.Run("no args returns error", func(t *testing.T) {
+		_, err := parseTLSCipher([]string{}, &OpenVPNOptions{})
+		if !errors.Is(err, ErrBadConfig) {
+			t.Errorf("expected ErrBadConfig, got %v", err)
+		}
+	})
+
+	t.Run("two args returns error", func(t *testing.T) {
+		_, err := parseTLSCipher([]string{"TLS-ECDHE-ECDSA-WITH-AES-256-GCM-SHA384", "extra"}, &OpenVPNOptions{})
+		if !errors.Is(err, ErrBadConfig) {
+			t.Errorf("expected ErrBadConfig, got %v", err)
+		}
+	})
+
+	t.Run("single argument is stored verbatim", func(t *testing.T) {
+		o, err := parseTLSCipher([]string{"TLS-ECDHE-ECDSA-WITH-AES-256-GCM-SHA384"}, &OpenVPNOptions{})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if o.TLSCipher != "TLS-ECDHE-ECDSA-WITH-AES-256-GCM-SHA384" {
+			t.Errorf("got %q want %q", o.TLSCipher, "TLS-ECDHE-ECDSA-WITH-AES-256-GCM-SHA384")
+		}
+	})
+
+	t.Run("colon-separated list is stored verbatim", func(t *testing.T) {
+		list := "TLS-ECDHE-ECDSA-WITH-AES-256-GCM-SHA384:TLS-ECDHE-RSA-WITH-AES-256-GCM-SHA384"
+		o, err := parseTLSCipher([]string{list}, &OpenVPNOptions{})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if o.TLSCipher != list {
+			t.Errorf("got %q want %q", o.TLSCipher, list)
+		}
+	})
+}
+
+func Test_parseRemoteCertEKU(t *testing.T) {
+	t.Run("no args returns error", func(t *testing.T) {
+		_, err := parseRemoteCertEKU([]string{}, &OpenVPNOptions{})
+		if !errors.Is(err, ErrBadConfig) {
+			t.Errorf("expected ErrBadConfig, got %v", err)
+		}
+	})
+
+	t.Run("single word arg is stored", func(t *testing.T) {
+		o, err := parseRemoteCertEKU([]string{"serverAuth"}, &OpenVPNOptions{})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if o.RemoteCertEKU != "serverAuth" {
+			t.Errorf("got %q want %q", o.RemoteCertEKU, "serverAuth")
+		}
+	})
+
+	t.Run("multi-word arg is joined with spaces", func(t *testing.T) {
+		o, err := parseRemoteCertEKU([]string{"TLS", "Web", "Server", "Authentication"}, &OpenVPNOptions{})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if o.RemoteCertEKU != "TLS Web Server Authentication" {
+			t.Errorf("got %q want %q", o.RemoteCertEKU, "TLS Web Server Authentication")
+		}
+	})
+
+	t.Run("quoted multi-word arg has quotes stripped", func(t *testing.T) {
+		// simulates: remote-cert-eku "TLS Web Server Authentication"
+		// which splits into: ["\"TLS", "Web", "Server", "Authentication\""]
+		o, err := parseRemoteCertEKU([]string{"\"TLS", "Web", "Server", "Authentication\""}, &OpenVPNOptions{})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if o.RemoteCertEKU != "TLS Web Server Authentication" {
+			t.Errorf("got %q want %q", o.RemoteCertEKU, "TLS Web Server Authentication")
+		}
+	})
 }
 
 func Test_parseAuthUser(t *testing.T) {

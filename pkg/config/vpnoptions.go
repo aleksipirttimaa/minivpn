@@ -70,26 +70,29 @@ var SupportedAuth = []string{
 // different modules that need it.
 type OpenVPNOptions struct {
 	// These options have the same name of OpenVPN options referenced in the official documentation:
-	Remote         string
-	Port           string
-	Proto          Proto
-	Username       string
-	Password       string
-	CAPath         string
-	CertPath       string
-	KeyPath        string
-	TLSAuthPath    string
-	TLSCryptPath   string
-	TLSCryptV2Path string
-	CA             []byte
-	Cert           []byte
-	Key            []byte
-	TLSAuth        []byte
-	TLSCrypt       []byte
-	TLSCryptV2     []byte
-	Cipher         string
-	Auth           string
-	TLSMaxVer      string
+	Remote         	string
+	Port           	string
+	Proto          	Proto
+	Username       	string
+	Password       	string
+	CAPath         	string
+	CertPath       	string
+	KeyPath        	string
+	TLSAuthPath    	string
+	TLSCryptPath   	string
+	TLSCryptV2Path 	string
+	CA             	[]byte
+	Cert           	[]byte
+	Key            	[]byte
+	TLSAuth        	[]byte
+	TLSCrypt       	[]byte
+	TLSCryptV2     	[]byte
+	TLSAuthDirection int
+	Cipher        	string
+	Auth            string
+	RemoteCertEKU   string
+	TLSCipher       string
+	TLSMaxVer       string
 
 	// Below are options that do not conform strictly to the OpenVPN configuration format, but still can
 	// be understood by us in a configuration file:
@@ -259,7 +262,7 @@ func parseKey(p []string, o *OpenVPNOptions, basedir string) (*OpenVPNOptions, e
 
 func parseTLSAuth(p []string, o *OpenVPNOptions, basedir string) (*OpenVPNOptions, error) {
 	e := fmt.Errorf("%w: %s", ErrBadConfig, "tls-auth expects a valid file")
-	if len(p) != 1 {
+	if len(p) < 1 || len(p) > 2 {
 		return o, e
 	}
 	tlsAuth := toAbs(p[0], basedir)
@@ -270,6 +273,36 @@ func parseTLSAuth(p []string, o *OpenVPNOptions, basedir string) (*OpenVPNOption
 		return o, e
 	}
 	o.TLSAuthPath = tlsAuth
+	if len(p) == 2 {
+		dir, err := parseKeyDirection(p[1])
+		if err != nil {
+			return o, err
+		}
+		o.TLSAuthDirection = dir
+	}
+	return o, nil
+}
+
+func parseKeyDirection(s string) (int, error) {
+	switch s {
+	case "0":
+		return 0, nil
+	case "1":
+		return 1, nil
+	default:
+		return -1, fmt.Errorf("%w: key-direction must be 0 or 1", ErrBadConfig)
+	}
+}
+
+func parseKeyDirectionDirective(p []string, o *OpenVPNOptions) (*OpenVPNOptions, error) {
+	if len(p) != 1 {
+		return o, fmt.Errorf("%w: %s", ErrBadConfig, "key-direction expects a single argument (0 or 1)")
+	}
+	dir, err := parseKeyDirection(p[0])
+	if err != nil {
+		return o, err
+	}
+	o.TLSAuthDirection = dir
 	return o, nil
 }
 
@@ -364,6 +397,22 @@ func parseTLSVerMax(p []string, o *OpenVPNOptions) (*OpenVPNOptions, error) {
 	return o, nil
 }
 
+func parseTLSCipher(p []string, o *OpenVPNOptions) (*OpenVPNOptions, error) {
+	if len(p) != 1 {
+		return o, fmt.Errorf("%w: %s", ErrBadConfig, "tls-cipher expects one argument")
+	}
+	o.TLSCipher = p[0]
+	return o, nil
+}
+
+func parseRemoteCertEKU(p []string, o *OpenVPNOptions) (*OpenVPNOptions, error) {
+	if len(p) == 0 {
+		return o, fmt.Errorf("%w: %s", ErrBadConfig, "remote-cert-eku requires an argument")
+	}
+	o.RemoteCertEKU = strings.Trim(strings.Join(p, " "), "\"")
+	return o, nil
+}
+
 func parseProxyOBFS4(p []string, o *OpenVPNOptions) (*OpenVPNOptions, error) {
 	if len(p) != 1 {
 		return o, fmt.Errorf("%w: %s", ErrBadConfig, "proto-obfs4: need a properly configured proxy")
@@ -374,14 +423,17 @@ func parseProxyOBFS4(p []string, o *OpenVPNOptions) (*OpenVPNOptions, error) {
 }
 
 var pMap = map[string]interface{}{
-	"proto":           parseProto,
-	"remote":          parseRemote,
-	"cipher":          parseCipher,
-	"auth":            parseAuth,
-	"compress":        parseCompress,
-	"comp-lzo":        parseCompLZO,
-	"proxy-obfs4":     parseProxyOBFS4,
-	"tls-version-max": parseTLSVerMax, // this is currently ignored because of uTLS
+	"proto":           	parseProto,
+	"remote":          	parseRemote,
+	"cipher":          	parseCipher,
+	"auth":            	parseAuth,
+	"compress":        	parseCompress,
+	"comp-lzo":        	parseCompLZO,
+	"proxy-obfs4":     	parseProxyOBFS4,
+	"tls-version-max":  parseTLSVerMax, // this is currently ignored because of uTLS
+	"tls-cipher":       parseTLSCipher,
+	"key-direction":    parseKeyDirectionDirective,
+	"remote-cert-eku": 	parseRemoteCertEKU,
 }
 
 var pMapDir = map[string]interface{}{
@@ -396,7 +448,7 @@ var pMapDir = map[string]interface{}{
 
 func parseOption(opt *OpenVPNOptions, dir, key string, p []string, lineno int) (*OpenVPNOptions, error) {
 	switch key {
-	case "proto", "remote", "cipher", "auth", "compress", "comp-lzo", "tls-version-max", "proxy-obfs4":
+	case "proto", "remote", "cipher", "auth", "compress", "comp-lzo", "tls-version-max", "tls-cipher", "proxy-obfs4", "key-direction", "remote-cert-eku":
 		fn := pMap[key].(func([]string, *OpenVPNOptions) (*OpenVPNOptions, error))
 		if updatedOpt, e := fn(p, opt); e != nil {
 			return updatedOpt, e
@@ -417,28 +469,29 @@ func parseOption(opt *OpenVPNOptions, dir, key string, p []string, lineno int) (
 // format. The config file supports inline file inclusion for <ca>, <cert> and <key>.
 func getOptionsFromLines(lines []string, dir string) (*OpenVPNOptions, error) {
 	opt := &OpenVPNOptions{
-		Remote:         "",
-		Port:           "",
-		Proto:          ProtoTCP,
-		Username:       "",
-		Password:       "",
-		CAPath:         "",
-		CertPath:       "",
-		KeyPath:        "",
-		TLSAuthPath:    "",
-		TLSCryptPath:   "",
-		TLSCryptV2Path: "",
-		CA:             []byte{},
-		Cert:           []byte{},
-		Key:            []byte{},
-		TLSAuth:        []byte{},
-		TLSCrypt:       []byte{},
-		TLSCryptV2:     []byte{},
-		Cipher:         "",
-		Auth:           "",
-		TLSMaxVer:      "",
-		Compress:       CompressionEmpty,
-		ProxyOBFS4:     "",
+		Remote:         	"",
+		Port:           	"",
+		Proto:          	ProtoTCP,
+		Username:       	"",
+		Password:       	"",
+		CAPath:         	"",
+		CertPath:       	"",
+		KeyPath:      	 	"",
+		TLSAuthPath:    	"",
+		TLSCryptPath:   	"",
+		TLSCryptV2Path: 	"",
+		CA:             	[]byte{},
+		Cert:           	[]byte{},
+		Key:            	[]byte{},
+		TLSAuth:          	[]byte{},
+		TLSCrypt:         	[]byte{},
+		TLSCryptV2:       	[]byte{},
+		TLSAuthDirection: 	-1,
+		Cipher:           	"",
+		Auth:           	"SHA1",
+		TLSMaxVer:      	"",
+		Compress:       	CompressionEmpty,
+		ProxyOBFS4:   		"",
 	}
 
 	// tag and inlineBuf are used to parse inline files.
