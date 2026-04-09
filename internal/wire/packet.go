@@ -28,8 +28,10 @@ func MarshalPacket(p *model.Packet, packetAuth *ControlChannelSecurity) ([]byte,
 
 	switch p.Opcode {
 	case model.P_DATA_V2:
-		// we assume this is an encrypted data packet,
-		// so we serialize just the encrypted payload
+		// p.Payload is produced by encryptAndEncodePayload, which conveniently prepends
+		// the full P_DATA_V2 header (opcode+keyID byte, 3-byte peerID, 4-byte
+		// packet-id) followed by the GCM tag and ciphertext.
+		buf.Write(p.Payload)
 
 	default:
 		// Chunks that of the packet which will be composed in different ways
