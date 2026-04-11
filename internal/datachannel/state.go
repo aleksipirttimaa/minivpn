@@ -2,11 +2,60 @@ package datachannel
 
 import (
 	"hash"
-	"math"
 	"sync"
-
-	"github.com/ooni/minivpn/internal/model"
 )
+
+// replayWindowSize is the number of packet IDs the sliding window tracks.
+// Matches OpenVPN's DEFAULT_SEQ_BACKTRACK (packet_id.h).
+const replayWindowSize = 64
+
+// replayWindow is a sliding-window duplicate / replay filter for the
+// non-AEAD data channel. It accepts a packet ID if it is either ahead of
+// the highest ID seen so far, or within replayWindowSize positions behind
+// and not already received.
+type replayWindow struct {
+	maxID  uint32
+	seen   [replayWindowSize]bool
+	ready  bool
+}
+
+// checkAndRecord returns true and records the ID if the packet should be
+// accepted, or false if it is a replay or outside the window.
+func (w *replayWindow) checkAndRecord(id uint32) bool {
+	if id == 0 {
+		return false // OpenVPN rejects packet ID zero
+	}
+	if !w.ready {
+		w.maxID = id
+		w.seen[id%replayWindowSize] = true
+		w.ready = true
+		return true
+	}
+	if id > w.maxID {
+		// Advance the window, clearing any slots that fall into the new range.
+		advance := id - w.maxID
+		if advance >= replayWindowSize {
+			w.seen = [replayWindowSize]bool{}
+		} else {
+			for i := uint32(1); i <= advance; i++ {
+				w.seen[(w.maxID+i)%replayWindowSize] = false
+			}
+		}
+		w.maxID = id
+		w.seen[id%replayWindowSize] = true
+		return true
+	}
+	diff := w.maxID - id
+	if diff >= replayWindowSize {
+		return false // too far behind the window
+	}
+	slot := id % replayWindowSize
+	if w.seen[slot] {
+		return false // already received
+	}
+	w.seen[slot] = true
+	return true
+}
 
 // keySlot holds the different local and remote keys.
 type keySlot [64]byte
@@ -23,9 +72,7 @@ type dataChannelState struct {
 	hmacKeyLocal    keySlot
 	hmacKeyRemote   keySlot
 
-	// TODO(ainghazal): we need to keep a local packetID too. It should be separated from the control channel.
-	// TODO: move this to sessionManager perhaps?
-	remotePacketID model.PacketID
+	replay replayWindow
 
 	hash func() hash.Hash
 	mu   sync.Mutex
@@ -34,23 +81,10 @@ type dataChannelState struct {
 	// keyID           int
 }
 
-// SetRemotePacketID stores the passed packetID internally.
-func (dcs *dataChannelState) SetRemotePacketID(id model.PacketID) {
+// CheckAndRecord accepts or rejects an incoming packet ID using the sliding
+// replay window. It is safe for concurrent use.
+func (dcs *dataChannelState) CheckAndRecord(id uint32) bool {
 	dcs.mu.Lock()
 	defer dcs.mu.Unlock()
-	dcs.remotePacketID = model.PacketID(id)
-}
-
-// RemotePacketID returns the last known remote packetID. It returns an error
-// if the stored packet id has reached the maximum capacity of the packetID
-// type.
-func (dcs *dataChannelState) RemotePacketID() (model.PacketID, error) {
-	dcs.mu.Lock()
-	defer dcs.mu.Unlock()
-	pid := dcs.remotePacketID
-	if pid == math.MaxUint32 {
-		// we reached the max packetID, increment will overflow
-		return 0, ErrExpiredKey
-	}
-	return pid, nil
+	return dcs.replay.checkAndRecord(id)
 }

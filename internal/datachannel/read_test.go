@@ -2,6 +2,7 @@ package datachannel
 
 import (
 	"bytes"
+	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"reflect"
@@ -9,7 +10,17 @@ import (
 
 	"github.com/apex/log"
 	"github.com/ooni/minivpn/internal/session"
+	"github.com/ooni/minivpn/pkg/config"
 )
+
+// makeNonAEADBuffer builds a minimal non-AEAD plaintext buffer where the
+// first four bytes encode id and the rest are payload.
+func makeNonAEADBuffer(id uint32, payload []byte) []byte {
+	buf := make([]byte, 4+len(payload))
+	binary.BigEndian.PutUint32(buf, id)
+	copy(buf[4:], payload)
+	return buf
+}
 
 func Test_decodeEncryptedPayloadAEAD(t *testing.T) {
 	state := makeTestingStateAEAD()
@@ -141,6 +152,112 @@ func Test_decodeEncryptedPayloadNonAEAD(t *testing.T) {
 			}
 			if !bytes.Equal(got.ciphertext, tt.want.ciphertext) {
 				t.Errorf("decodeEncryptedPayloadNonAEAD().iv = %v, want %v", got.iv, tt.want.iv)
+			}
+		})
+	}
+}
+
+// Test_maybeDecompress_replayWindow exercises the sliding-window replay filter
+// inside maybeDecompress for non-AEAD ciphers. Each step shares the same
+// dataChannelState to simulate sequential packet reception.
+func Test_maybeDecompress_replayWindow(t *testing.T) {
+	payload := []byte("data")
+	opts := &config.OpenVPNOptions{} // no compression
+
+	type step struct {
+		name    string
+		id      uint32
+		wantErr error
+	}
+
+	tests := []struct {
+		name  string
+		steps []step
+	}{
+		{
+			name: "in-order packets are all accepted",
+			steps: []step{
+				{"id=1", 1, nil},
+				{"id=2", 2, nil},
+				{"id=3", 3, nil},
+			},
+		},
+		{
+			name: "out-of-order within window is accepted",
+			steps: []step{
+				{"id=1", 1, nil},
+				{"id=3", 3, nil},
+				{"id=2 arrives late but within window", 2, nil},
+			},
+		},
+		{
+			name: "duplicate packet is rejected",
+			steps: []step{
+				{"id=1 first", 1, nil},
+				{"id=1 duplicate", 1, ErrReplayAttack},
+			},
+		},
+		{
+			name: "zero packet ID is always rejected",
+			steps: []step{
+				{"id=0", 0, ErrReplayAttack},
+			},
+		},
+		{
+			name: "packet outside the window is rejected",
+			// Advance maxID to replayWindowSize+1 then send id=1 which
+			// is replayWindowSize positions behind and thus out of window.
+			steps: func() []step {
+				ss := make([]step, 0, replayWindowSize+2)
+				for i := uint32(1); i <= replayWindowSize+1; i++ {
+					ss = append(ss, step{name: "advance", id: i, wantErr: nil})
+				}
+				ss = append(ss, step{"id=1 now outside window", 1, ErrReplayAttack})
+				return ss
+			}(),
+		},
+		{
+			name: "last slot inside window is accepted",
+			// maxID advances to replayWindowSize, then id=1 is exactly
+			// replayWindowSize-1 positions behind (inside the window).
+			steps: func() []step {
+				ss := make([]step, 0, replayWindowSize+1)
+				for i := uint32(1); i <= replayWindowSize; i++ {
+					ss = append(ss, step{name: "advance", id: i, wantErr: nil})
+				}
+				// id=1 is replayWindowSize-1 steps behind maxID=replayWindowSize: still inside.
+				ss = append(ss, step{"id=1 just inside window", 1, ErrReplayAttack}) // already seen during advance
+				return ss
+			}(),
+		},
+		{
+			name: "large jump clears window, old IDs rejected",
+			steps: []step{
+				{"id=1", 1, nil},
+				{"id=200 clears window", 200, nil},
+				{"id=1 now outside window", 1, ErrReplayAttack},
+			},
+		},
+		{
+			name: "large jump clears window, recent unseen ID accepted",
+			steps: []step{
+				{"id=1", 1, nil},
+				{"id=200 clears window", 200, nil},
+				// id=137 is 63 positions behind 200: within window, unseen.
+				{"id=137 within window unseen", 137, nil},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			st := makeTestingStateNonAEAD()
+			for _, s := range tt.steps {
+				buf := makeNonAEADBuffer(s.id, payload)
+				_, err := maybeDecompress(buf, st, opts)
+				if !errors.Is(err, s.wantErr) {
+					t.Errorf("step %q (id=%d): got err %v, want %v", s.name, s.id, err, s.wantErr)
+				}
 			}
 		})
 	}

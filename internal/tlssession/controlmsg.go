@@ -15,6 +15,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net"
 	"strconv"
 	"strings"
 
@@ -168,6 +169,20 @@ func newTunnelInfoFromPushedOptions(opts remoteOptions) *model.TunnelInfo {
 			t.PeerID = peer
 		}
 	}
+	if p := opts["ping"]; len(p) == 1 {
+		if n, err := strconv.Atoi(p[0]); err == nil && n > 0 {
+			t.PingInterval = n
+		}
+	}
+	dhcpOpts := opts["dhcp-option"]
+	for i := 0; i+1 < len(dhcpOpts); i++ {
+		if strings.EqualFold(dhcpOpts[i], "DNS") {
+			if ip := net.ParseIP(dhcpOpts[i+1]); ip != nil {
+				t.DNSServers = append(t.DNSServers, ip)
+			}
+			i++
+		}
+	}
 	return t
 }
 
@@ -186,7 +201,7 @@ func pushedOptionsAsMap(pushedOptions []byte) remoteOptions {
 	for _, opt := range opts {
 		vals := strings.Split(opt, " ")
 		k, v := vals[0], vals[1:]
-		optMap[k] = v
+		optMap[k] = append(optMap[k], v...)
 	}
 	return optMap
 }

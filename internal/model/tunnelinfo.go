@@ -1,5 +1,7 @@
 package model
 
+import "net"
+
 // TunnelInfo holds state about the VPN TunnelInfo that has longer duration than a
 // given session. This information is gathered at different stages:
 // - during the handshake (mtu).
@@ -19,4 +21,12 @@ type TunnelInfo struct {
 
 	// PeerID is the peer-id assigned to us by the remote.
 	PeerID int
+
+	// PingInterval is the keepalive ping interval in seconds, pushed by the server via --ping.
+	// Zero means the server did not push a ping interval.
+	PingInterval int
+
+	// DNSServers are the DNS server IPs pushed via "dhcp-option DNS <ip>".
+	// Empty if the server did not push any.
+	DNSServers []net.IP
 }

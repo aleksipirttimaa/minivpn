@@ -8,7 +8,6 @@ var (
 	ErrReplayAttack   = errors.New("replay attack")
 	ErrBadHMAC        = errors.New("bad hmac")
 	ErrInitError      = errors.New("improperly initialized")
-	ErrExpiredKey     = errors.New("key is expired")
 
 	// ErrInvalidKeySize means that the key size is invalid.
 	ErrInvalidKeySize = errors.New("invalid key size")

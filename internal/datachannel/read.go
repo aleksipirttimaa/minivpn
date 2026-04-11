@@ -131,15 +131,10 @@ func maybeDecompress(b []byte, st *dataChannelState, opt *config.OpenVPNOptions)
 			payload = b[:]
 		}
 	default: // non-aead
-		remotePacketID := model.PacketID(binary.BigEndian.Uint32(b[:4]))
-		lastKnownRemote, err := st.RemotePacketID()
-		if err != nil {
-			return payload, err
-		}
-		if remotePacketID <= lastKnownRemote {
+		incomingID := binary.BigEndian.Uint32(b[:4])
+		if !st.CheckAndRecord(incomingID) {
 			return []byte{}, ErrReplayAttack
 		}
-		st.SetRemotePacketID(remotePacketID)
 
 		switch opt.Compress {
 		case config.CompressionStub, config.CompressionLZONo:

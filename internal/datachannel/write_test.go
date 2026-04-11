@@ -404,7 +404,7 @@ func Test_maybeDecompress(t *testing.T) {
 
 	getStateForDecompressTestNonAEAD := func() *dataChannelState {
 		st := makeTestingStateNonAEAD()
-		st.remotePacketID = model.PacketID(0x42)
+		st.CheckAndRecord(0x42)
 		return st
 	}
 

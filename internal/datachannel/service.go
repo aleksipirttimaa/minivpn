@@ -5,9 +5,9 @@ package datachannel
 //
 
 import (
-	"encoding/hex"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/ooni/minivpn/internal/model"
 	"github.com/ooni/minivpn/internal/session"
@@ -67,6 +67,7 @@ func (s *Service) StartWorkers(
 		keyReady:             s.KeyReady,
 		logger:               config.Logger(),
 		muxerToData:          s.MuxerToData,
+		pingToDown:           make(chan []byte, 1),
 		sessionManager:       sessionManager,
 		tunToData:            s.TUNToData,
 		workersManager:       workersManager,
@@ -77,6 +78,7 @@ func (s *Service) StartWorkers(
 	workersManager.StartWorker(ws.moveUpWorker)
 	workersManager.StartWorker(func() { ws.moveDownWorker(firstKeyReady) })
 	workersManager.StartWorker(func() { ws.keyWorker(firstKeyReady) })
+	workersManager.StartWorker(func() { ws.keepaliveWorker(firstKeyReady) })
 }
 
 // workersState contains the data channel state.
@@ -87,6 +89,7 @@ type workersState struct {
 	keyReady             <-chan *session.DataChannelKey
 	logger               model.Logger
 	muxerToData          <-chan *model.Packet
+	pingToDown           chan []byte
 	sessionManager       *session.Manager
 	tunToData            <-chan []byte
 	workersManager       *workers.Manager
@@ -106,21 +109,21 @@ func (ws *workersState) moveDownWorker(firstKeyReady <-chan any) {
 	// wait for the first key to be ready
 	case <-firstKeyReady:
 		for {
+			var data []byte
 			select {
-			case data := <-ws.tunToData:
-				// TODO: writePacket should get the ACTIVE KEY (verify this)
-				packet, err := ws.dataChannel.writePacket(data)
-				if err != nil {
-					ws.logger.Warnf("error encrypting: %v", err)
-					continue
-				}
-
-				select {
-				case ws.dataOrControlToMuxer <- packet:
-				case <-ws.workersManager.ShouldShutdown():
-					return
-				}
-
+			case data = <-ws.tunToData:
+			case data = <-ws.pingToDown:
+			case <-ws.workersManager.ShouldShutdown():
+				return
+			}
+			// TODO: writePacket should get the ACTIVE KEY (verify this)
+			packet, err := ws.dataChannel.writePacket(data)
+			if err != nil {
+				ws.logger.Warnf("error encrypting: %v", err)
+				continue
+			}
+			select {
+			case ws.dataOrControlToMuxer <- packet:
 			case <-ws.workersManager.ShouldShutdown():
 				return
 			}
@@ -153,15 +156,50 @@ func (ws *workersState) moveUpWorker() {
 				continue
 			}
 
-			if len(decrypted) == 16 {
-				// TODO: should reply to this keepalive ping
-				// "2a 18 7b f3 64 1e b4 cb  07 ed 2d 0a 98 1f c7 48"
-				fmt.Println(hex.Dump(decrypted))
+			if (&model.Packet{Payload: decrypted}).IsPing() {
+				ws.logger.Debugf("%s: received keepalive ping, dropping", serviceName)
 				continue
 			}
 
 			// POSSIBLY BLOCK writing up towards TUN
 			ws.dataToTUN <- decrypted
+		case <-ws.workersManager.ShouldShutdown():
+			return
+		}
+	}
+}
+
+// keepaliveWorker sends a keepalive ping packet at the interval pushed by the server
+// via the --ping option. It waits for the first key to be ready before starting,
+// and exits silently (without triggering a global shutdown) if no ping interval was pushed.
+func (ws *workersState) keepaliveWorker(firstKeyReady <-chan any) {
+	workerName := fmt.Sprintf("%s: keepaliveWorker", serviceName)
+	defer ws.workersManager.OnWorkerDone(workerName)
+
+	select {
+	case <-firstKeyReady:
+	case <-ws.workersManager.ShouldShutdown():
+		return
+	}
+
+	interval := ws.sessionManager.TunnelInfo().PingInterval
+	if interval <= 0 {
+		ws.logger.Infof("%s: no ping interval configured, keepalive disabled", workerName)
+		return
+	}
+
+	ticker := time.NewTicker(time.Duration(interval) * time.Second)
+	defer ticker.Stop()
+	ws.logger.Infof("%s: sending keepalive every %ds", workerName, interval)
+
+	for {
+		select {
+		case <-ticker.C:
+			select {
+			case ws.pingToDown <- model.PingPayload:
+			case <-ws.workersManager.ShouldShutdown():
+				return
+			}
 		case <-ws.workersManager.ShouldShutdown():
 			return
 		}

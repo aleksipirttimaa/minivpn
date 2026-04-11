@@ -193,6 +193,12 @@ func (t *TUN) Write(data []byte) (int, error) {
 	}
 }
 
+// DNSServers returns the DNS server IPs pushed by the OpenVPN server via
+// "dhcp-option DNS <ip>". Returns nil if the server did not push any.
+func (t *TUN) DNSServers() []net.IP {
+	return t.session.TunnelInfo().DNSServers
+}
+
 // LocalAddr implements net.Conn
 func (t *TUN) LocalAddr() net.Addr {
 	ip := t.session.TunnelInfo().IP
@@ -246,4 +252,12 @@ func (t *tunBioAddr) String() string {
 // NetMask returns the configured net mask for the TUN interface.
 func (t *TUN) NetMask() net.IPMask {
 	return net.IPMask(net.ParseIP(t.session.TunnelInfo().NetMask))
+}
+
+// MTU returns the tun-mtu pushed by the server, or 1500, an OpenVPN default.
+func (t *TUN) MTU() int {
+	if mtu := t.session.TunnelInfo().MTU; mtu > 0 {
+		return mtu
+	}
+	return 1500
 }
